@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>K线生成器</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;padding:12px;background:#0b1220;color:#e2e8f0;
+       font-family:system-ui,sans-serif;display:flex}
+  .layout{display:flex;gap:12px;width:100%;min-height:0}
+  .left{width:330px;flex:none;display:flex;flex-direction:column;min-height:0}
+  .topbar{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex:none}
+  .topbar label{font-size:13px;color:#94a8bf}
+  .topbar input{width:76px;padding:4px 7px;background:#0b1522;color:#e2e8f0;
+    border:1px solid #2b3d55;border-radius:6px;font-family:monospace;outline:none;font-size:12px}
+  .topbar input:focus{border-color:#3b82f6}
+
+  .head{display:grid;grid-template-columns:26px repeat(4,1fr);gap:4px;
+    font-size:11px;color:#6b8199;text-align:center;margin-bottom:4px;flex:none}
+
+  /* ===== 虚拟滚动容器 ===== */
+  #viewport{flex:1;overflow-y:auto;position:relative;min-height:80px;
+    scrollbar-gutter:stable;padding-right:2px}
+  #spacer{width:1px;pointer-events:none}
+  #visible{position:absolute;left:0;right:2px;top:0}
+
+  .row{display:grid;grid-template-columns:26px repeat(4,1fr);gap:4px;
+    height:24px;align-items:center;margin-bottom:4px}
+  .row .idx{font-size:11px;color:#6b8199;display:flex;align-items:center;justify-content:center;height:100%}
+  .row input{width:100%;height:20px;padding:0 4px;background:#0b1522;color:#e2e8f0;
+    border:1px solid #2b3d55;border-radius:4px;font-family:monospace;font-size:11px;outline:none}
+  .row input:focus{border-color:#3b82f6}
+  input[type=number]::-webkit-outer-spin-button,
+  input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+  input[type=number]{-moz-appearance:textfield;appearance:textfield}
+
+  .bulk{flex:none;margin-top:10px;border-top:1px solid #24344a;padding-top:8px}
+  .bulk textarea{width:100%;height:56px;resize:none;background:#0b1522;color:#e2e8f0;
+    border:1px solid #2b3d55;border-radius:6px;padding:6px 8px;
+    font:12px monospace;outline:none}
+  .bulk textarea:focus{border-color:#3b82f6}
+  #copyBtn{margin-top:6px;width:100%;padding:6px;border:1px solid #2b3d55;border-radius:6px;
+    background:#16243a;color:#cfe0f5;font-size:12px;cursor:pointer}
+  #copyBtn:hover{background:#1d2f4a;border-color:#3b82f6}
+
+  .right{flex:1;min-width:0;min-height:0;background:#131e2e;border-radius:10px;padding:8px}
+  canvas{width:100%;height:100%;display:block;cursor:grab}
+  @media(max-width:760px){
+    .layout{flex-direction:column}
+    .left{width:100%;height:55%;min-height:0}
+    .right{height:45%}
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+  <div class="left">
+    <div class="topbar">
+      <label>K线数量</label>
+      <input type="number" id="count" min="1" max="8760" value="2">
+    </div>
+    <div class="head"><span>#</span><span>O</span><span>H</span><span>L</span><span>C</span></div>
+
+    <!-- 虚拟滚动：spacer 撑高度，visible 只渲染可见行 -->
+    <div id="viewport">
+      <div id="spacer"></div>
+      <div id="visible"></div>
+    </div>
+
+    <div class="bulk">
+      <textarea id="bulkText" placeholder="粘贴/输入数字，自动填入上方表格（每 4 个数字一根 K 线）"></textarea>
+      <button id="copyBtn">复制表格数据</button>
+    </div>
+  </div>
+  <div class="right"><canvas id="chart"></canvas></div>
+</div>
+
+<script>
+const DEFAULT = [
+  {o:100, h:122, l:92,  c:116},
+  {o:116, h:128, l:104, c:108}
+];
+const KEYS  = ['o','h','l','c'];
+const STORE = 'kline-data';
+const MAXN  = 8760;
+
+// ===== 虚拟滚动常量 =====
+const RH = 24;        // 行高，必须与 CSS 的 .row height 一致（含 margin-bottom 4px 时用 28）
+const BUFFER = 6;     // 视口外缓冲行数
+
+let values, count;
+let start = 0, span = 1;        // K线图视口
+let startRow = 0, endRow = 0;   // 表格虚拟滚动窗口
+
+(function load() {
+  let saved = null;
+  try {
+    const raw = JSON.parse(localStorage.getItem(STORE));
+    if (Array.isArray(raw) && raw.length > 0 && raw.length % 4 === 0) saved = raw;
+  } catch (e) {}
+  if (saved) {
+    values = saved;
+    count  = Math.min(values.length / 4, MAXN);
+    if (values.length > count * 4) values.length = count * 4;
+  } else {
+    count  = DEFAULT.length;
+    values = DEFAULT.flatMap(d => KEYS.map(k => d[k]));
+  }
+})();
+
+function defaultVal(i, j) {
+  const round = Math.floor(i / DEFAULT.length);
+  return +(DEFAULT[i % DEFAULT.length][KEYS[j]] + round * 8).toFixed(2);
+}
+
+function save() {
+  localStorage.setItem(STORE, JSON.stringify(values));
+}
+
+// ===== 虚拟滚动渲染 =====
+const viewport = document.getElementById('viewport');
+const spacer   = document.getElementById('spacer');
+const visible  = document.getElementById('visible');
+
+// 整块高度（含行间 margin），用于 spacer 与坐标换算
+const ROW_FULL = RH + 4;
+
+function layout() {
+  spacer.style.height = (count * ROW_FULL) + 'px';
+  const maxScroll = Math.max(0, count * ROW_FULL - viewport.clientHeight);
+  if (viewport.scrollTop > maxScroll) viewport.scrollTop = maxScroll;
+  update(true);
+}
+
+function update(force) {
+  if (!viewport.clientHeight) return;
+
+  const st = viewport.scrollTop;
+  const vh = viewport.clientHeight;
+  const s = Math.max(0, Math.floor(st / ROW_FULL) - BUFFER);
+  const e = Math.min(count, Math.ceil((st + vh) / ROW_FULL) + BUFFER);
+
+  if (!force && s === startRow && e === endRow) return;
+
+  // 重建前记录焦点（若正在编辑且仍可见，重建后恢复）
+  const ae = document.activeElement;
+  let focusIdx = null;
+  if (ae && ae.dataset && ae.dataset.idx != null && visible.contains(ae)) {
+    focusIdx = +ae.dataset.idx;
+  }
+
+  startRow = s;
+  endRow = e;
+  visible.style.top = (startRow * ROW_FULL) + 'px';
+
+  let html = '';
+  for (let i = startRow; i < endRow; i++) {
+    html += `<div class="row"><span class="idx">${i+1}</span>`;
+    for (let j = 0; j < 4; j++) {
+      const idx = i * 4 + j;
+      const v = values[idx] ?? '';
+      html += `<input type="number" step="any" data-idx="${idx}" value="${v}" title="${KEYS[j].toUpperCase()}">`;
+    }
+    html += `</div>`;
+  }
+  visible.innerHTML = html;
+
+  if (focusIdx != null) {
+    const el = visible.querySelector(`input[data-idx="${focusIdx}"]`);
+    if (el) el.focus();
+  }
+}
+
+// 滚动：rAF 节流 + 窗口未变化则跳过重建
+let ticking = false;
+viewport.addEventListener('scroll', () => {
+  if (ticking) return;
+  ticking = true;
+  requestAnimationFrame(() => {
+    ticking = false;
+    update(false);
+  });
+});
+
+// 输入：只更新数据 + 重绘图表，**绝不重建表格 DOM**（否则焦点/IME 会丢）
+visible.addEventListener('input', e => {
+  const idx = e.target.dataset && e.target.dataset.idx;
+  if (idx == null) return;
+  values[+idx] = e.target.value;
+  save();
+  draw();
+});
+
+// 容器尺寸变化时重算可见行
+new ResizeObserver(() => update(true)).observe(viewport);
+
+// ===== 数量变化 =====
+const countInput = document.getElementById('count');
+
+function applyCount() {
+  let n = parseInt(countInput.value, 10);
+  if (!Number.isFinite(n)) n = count;
+  n = Math.max(1, Math.min(MAXN, n));
+  countInput.value = n;
+  if (n === count) return;
+
+  while (values.length < n * 4) {
+    const i = (values.length / 4) | 0;
+    const j = values.length % 4;
+    values.push(defaultVal(i, j));
+  }
+  if (values.length > n * 4) values.length = n * 4;
+
+  count = n;
+  start = 0;
+  span  = count;
+  layout();
+  save();
+  draw();
+}
+
+countInput.addEventListener('change', applyCount);
+countInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); countInput.blur(); }
+});
+
+// ===== 批量输入：文本框 → 主表格（单向） =====
+const bulkText = document.getElementById('bulkText');
+const copyBtn  = document.getElementById('copyBtn');
+
+bulkText.addEventListener('input', () => {
+  const nums = bulkText.value.match(/-?\d+(?:\.\d+)?/g);
+  if (!nums || !nums.length) return;
+
+  let n = Math.ceil(nums.length / 4);
+  n = Math.max(1, Math.min(MAXN, n));
+
+  const nv = [];
+  for (let k = 0; k < n * 4; k++) {
+    if (k < nums.length) {
+      nv.push(nums[k]);
+    } else {
+      nv.push(values[k] ?? defaultVal((k / 4) | 0, k % 4));
+    }
+  }
+
+  values = nv;
+  count  = n;
+  countInput.value = n;
+  start = 0;
+  span  = count;
+  layout();
+  save();
+  draw();
+});
+
+// ===== 复制表格数据 =====
+copyBtn.addEventListener('click', async () => {
+  const lines = [];
+  for (let i = 0; i < count; i++) {
+    lines.push(values.slice(i * 4, i * 4 + 4).join(' '));
+  }
+  const text = lines.join('\n');
+
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (err) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+  }
+  const old = copyBtn.textContent;
+  copyBtn.textContent = '已复制 ✓';
+  setTimeout(() => copyBtn.textContent = old, 1200);
+});
+
+// ===== 绘图 =====
+const cvs = document.getElementById('chart');
+const ctx = cvs.getContext('2d');
+
+function plotBox() {
+  const W = cvs.clientWidth, H = cvs.clientHeight;
+  const L = 62, R = 22, T = 24, B = 34;
+  return { W, H, x0: L, x1: W - R, y0: T, y1: H - B, pw: W - R - L };
+}
+
+function axisArrow(x1, y1, x2, y2) {
+  const a = Math.atan2(y2 - y1, x2 - x1), h = 8;
+  ctx.strokeStyle = '#5b6b80'; ctx.fillStyle = '#5b6b80'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x2, y2);
+  ctx.lineTo(x2 - Math.cos(a - .4) * h, y2 - Math.sin(a - .4) * h);
+  ctx.lineTo(x2 - Math.cos(a + .4) * h, y2 - Math.sin(a + .4) * h);
+  ctx.closePath(); ctx.fill();
+}
+
+function draw() {
+  const { W, H, x0, x1, y0, y1, pw } = plotBox();
+  if (!W || !H) return;
+  const dpr = devicePixelRatio || 1;
+  cvs.width = W * dpr; cvs.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const data = [];
+  for (let i = 0; i < count; i++) {
+    data.push({ o: +values[i*4], h: +values[i*4+1], l: +values[i*4+2], c: +values[i*4+3] });
+  }
+  if (data.some(d => [d.o,d.h,d.l,d.c].some(v => !isFinite(v)))) {
+    ctx.fillStyle = '#f59e0b'; ctx.font = '14px system-ui';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('请输入完整有效的数字', W/2, H/2);
+    return;
+  }
+
+  span  = Math.max(1, Math.min(span, count));
+  start = Math.max(0, Math.min(start, Math.max(0, count - span)));
+
+  const i0 = Math.max(0, Math.floor(start) - 1);
+  const i1 = Math.min(count - 1, Math.ceil(start + span) + 1);
+
+  let hi = -Infinity, lo = Infinity;
+  for (let i = i0; i <= i1; i++) {
+    const d = data[i];
+    hi = Math.max(hi, d.h, d.o, d.c);
+    lo = Math.min(lo, d.l, d.o, d.c);
+  }
+  const pad = (hi - lo) * 0.1 || 1;
+  hi += pad; lo -= pad;
+
+  const toY = p => y1 - (p - lo) / (hi - lo) * (y1 - y0);
+  const yZero = Math.max(y0, Math.min(y1, toY(0)));
+
+  axisArrow(x0, y1, x0, y0);
+  axisArrow(x0, yZero, x1, yZero);
+
+  ctx.font = '12px monospace'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (let i = 0; i <= 4; i++) {
+    const p = lo + (hi - lo) * i / 4, y = toY(p);
+    ctx.strokeStyle = 'rgba(148,163,184,.12)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
+    ctx.fillStyle = '#6b8199'; ctx.fillText(p.toFixed(2), x0 - 10, y);
+  }
+
+  if (yZero > y0 + 2 && yZero < y1 - 2) {
+    ctx.fillStyle = '#94a8bf'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    ctx.fillText('0', x0 - 10, yZero);
+  }
+
+  const slot = pw / span;
+  const bw = Math.max(slot * 0.82, 1);
+  const lw = slot > 8 ? 1.5 : 1;
+  const showLabel = slot >= 34;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x0, y0, pw, H - y0);
+  ctx.clip();
+
+  for (let i = i0; i <= i1; i++) {
+    const d = data[i];
+    const cx = x0 + (i - start + 0.5) * slot;
+    if (cx < x0 - slot || cx > x1 + slot) continue;
+
+    const up = d.c >= d.o;
+    const color = up ? '#ef4444' : '#54fcfc';
+    ctx.strokeStyle = color; ctx.fillStyle = color;
+    ctx.lineWidth = lw;
+
+    const yo = toY(d.o), yc = toY(d.c);
+    const mid = (yo + yc) / 2;
+    const bh = Math.max(Math.abs(yc - yo), up ? lw * 2 + 1 : 1);
+    const top = mid - bh / 2;
+    const bottom = top + bh;
+
+    ctx.beginPath(); ctx.moveTo(cx, toY(d.h)); ctx.lineTo(cx, top); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx, bottom); ctx.lineTo(cx, toY(d.l)); ctx.stroke();
+
+    if (up) ctx.strokeRect(cx - bw / 2, top, bw, bh);
+    else    ctx.fillRect(cx - bw / 2, top, bw, bh);
+
+    if (showLabel) {
+      ctx.fillStyle = '#6b8199'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.fillText('第' + (i + 1) + '根', cx, y1 + 12);
+    }
+  }
+  ctx.restore();
+}
+
+// ===== 交互：滚轮缩放 + 左键拖拽 =====
+cvs.addEventListener('wheel', e => {
+  e.preventDefault();
+  const { x0, x1, pw } = plotBox();
+  const rect = cvs.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  if (mx < x0 || mx > x1 || pw <= 0) return;
+
+  const ratio  = (mx - x0) / pw;
+  const dataX  = start + ratio * span;
+  const factor = e.deltaY > 0 ? 1.15 : 1 / 1.15;
+  const newSpan = Math.max(1, Math.min(span * factor, count));
+
+  span  = newSpan;
+  start = Math.max(0, Math.min(dataX - ratio * span, Math.max(0, count - span)));
+  draw();
+}, { passive: false });
+
+let dragging = false, dragX = 0, dragStart = 0;
+
+cvs.addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  dragging = true;
+  dragX = e.clientX;
+  dragStart = start;
+  cvs.style.cursor = 'grabbing';
+});
+
+window.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  const { pw } = plotBox();
+  if (pw <= 0) return;
+  const slot = pw / span;
+  const dx = e.clientX - dragX;
+  start = Math.max(0, Math.min(dragStart - dx / slot, Math.max(0, count - span)));
+  draw();
+});
+
+window.addEventListener('mouseup', () => {
+  if (!dragging) return;
+  dragging = false;
+  cvs.style.cursor = '';
+});
+
+new ResizeObserver(draw).observe(cvs);
+
+// ===== 初始化 =====
+countInput.value = count;
+start = 0;
+span  = count;
+layout();
+draw();
+</script>
+</body>
+</html>
