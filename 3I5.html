@@ -10,28 +10,29 @@
   body{margin:0;padding:12px;background:#0b1220;color:#e2e8f0;
        font-family:system-ui,sans-serif;display:flex}
   .layout{display:flex;gap:12px;width:100%;min-height:0}
-  .left{width:330px;flex:none;display:flex;flex-direction:column;min-height:0}
+  .left{width:400px;flex:none;display:flex;flex-direction:column;min-height:0}
   .topbar{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex:none}
   .topbar label{font-size:13px;color:#94a8bf}
   .topbar input{width:76px;padding:4px 7px;background:#0b1522;color:#e2e8f0;
     border:1px solid #2b3d55;border-radius:6px;font-family:monospace;outline:none;font-size:12px}
   .topbar input:focus{border-color:#3b82f6}
 
-  .head{display:grid;grid-template-columns:26px repeat(4,1fr);gap:4px;
-    font-size:11px;color:#6b8199;text-align:center;margin-bottom:4px;flex:none}
+  .head,.row{display:grid;grid-template-columns:32px repeat(4,1fr) 1.5fr;gap:4px}
+  .head{font-size:11px;color:#6b8199;text-align:center;margin-bottom:4px;flex:none}
 
-  /* ===== 虚拟滚动容器 ===== */
   #viewport{flex:1;overflow-y:auto;position:relative;min-height:80px;
     scrollbar-gutter:stable;padding-right:2px}
   #spacer{width:1px;pointer-events:none}
   #visible{position:absolute;left:0;right:2px;top:0}
 
-  .row{display:grid;grid-template-columns:26px repeat(4,1fr);gap:4px;
-    height:24px;align-items:center;margin-bottom:4px}
+  .row{height:24px;align-items:center;margin-bottom:4px}
   .row .idx{font-size:11px;color:#6b8199;display:flex;align-items:center;justify-content:center;height:100%}
   .row input{width:100%;height:20px;padding:0 4px;background:#0b1522;color:#e2e8f0;
     border:1px solid #2b3d55;border-radius:4px;font-family:monospace;font-size:11px;outline:none}
   .row input:focus{border-color:#3b82f6}
+  .row input.lbl{color:#fbbf24}
+  .row input.lbl:focus{border-color:#fbbf24}
+  .row.hl{background:rgba(251,191,36,.12);border-radius:4px}
   input[type=number]::-webkit-outer-spin-button,
   input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
   input[type=number]{-moz-appearance:textfield;appearance:textfield}
@@ -46,7 +47,7 @@
   #copyBtn:hover{background:#1d2f4a;border-color:#3b82f6}
 
   .right{flex:1;min-width:0;min-height:0;background:#131e2e;border-radius:10px;padding:8px}
-  canvas{width:100%;height:100%;display:block;cursor:grab}
+  canvas{width:100%;height:100%;display:block;cursor:crosshair}
   @media(max-width:760px){
     .layout{flex-direction:column}
     .left{width:100%;height:55%;min-height:0}
@@ -61,16 +62,15 @@
       <label>K线数量</label>
       <input type="number" id="count" min="1" max="8760" value="2">
     </div>
-    <div class="head"><span>#</span><span>O</span><span>H</span><span>L</span><span>C</span></div>
+    <div class="head"><span>序号</span><span>O</span><span>H</span><span>L</span><span>C</span><span>标注</span></div>
 
-    <!-- 虚拟滚动：spacer 撑高度，visible 只渲染可见行 -->
     <div id="viewport">
       <div id="spacer"></div>
       <div id="visible"></div>
     </div>
 
     <div class="bulk">
-      <textarea id="bulkText" placeholder="粘贴/输入数字，自动填入上方表格（每 4 个数字一根 K 线）"></textarea>
+      <textarea id="bulkText" placeholder="粘贴数据：每行 O H L C 标注（标注可选）"></textarea>
       <button id="copyBtn">复制表格数据</button>
     </div>
   </div>
@@ -79,34 +79,41 @@
 
 <script>
 const DEFAULT = [
-  {o:100, h:122, l:92,  c:116},
-  {o:116, h:128, l:104, c:108}
+  {o:100, h:122, l:92,  c:116, t: ''},
+  {o:116, h:128, l:104, c:108, t: ''}
 ];
 const KEYS  = ['o','h','l','c'];
 const STORE = 'kline-data';
 const MAXN  = 8760;
 
-// ===== 虚拟滚动常量 =====
-const RH = 24;        // 行高，必须与 CSS 的 .row height 一致（含 margin-bottom 4px 时用 28）
-const BUFFER = 6;     // 视口外缓冲行数
+const RH = 24;
+const ROW_FULL = RH + 4;
+const BUFFER = 6;
 
-let values, count;
-let start = 0, span = 1;        // K线图视口
-let startRow = 0, endRow = 0;   // 表格虚拟滚动窗口
+let values, labels, count;
+let start = 0, span = 1;
+let startRow = 0, endRow = 0;
+let selected = -1;
 
 (function load() {
-  let saved = null;
-  try {
-    const raw = JSON.parse(localStorage.getItem(STORE));
-    if (Array.isArray(raw) && raw.length > 0 && raw.length % 4 === 0) saved = raw;
-  } catch (e) {}
-  if (saved) {
-    values = saved;
+  let raw = null;
+  try { raw = JSON.parse(localStorage.getItem(STORE)); } catch (e) {}
+  let v = null, l = null;
+  if (Array.isArray(raw) && raw.length > 0 && raw.length % 4 === 0) {
+    v = raw; l = new Array(v.length / 4).fill('');
+  } else if (raw && Array.isArray(raw.v) && raw.v.length % 4 === 0) {
+    v = raw.v; l = Array.isArray(raw.l) ? raw.l : new Array(v.length / 4).fill('');
+  }
+  if (v) {
+    values = v;
+    labels = l;
     count  = Math.min(values.length / 4, MAXN);
-    if (values.length > count * 4) values.length = count * 4;
+    values.length = count * 4;
+    labels.length = count;
   } else {
     count  = DEFAULT.length;
     values = DEFAULT.flatMap(d => KEYS.map(k => d[k]));
+    labels = DEFAULT.map(d => d.t);
   }
 })();
 
@@ -116,16 +123,17 @@ function defaultVal(i, j) {
 }
 
 function save() {
-  localStorage.setItem(STORE, JSON.stringify(values));
+  localStorage.setItem(STORE, JSON.stringify({ v: values, l: labels }));
 }
 
-// ===== 虚拟滚动渲染 =====
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+}
+
+// ===== 虚拟滚动（倒序显示） =====
 const viewport = document.getElementById('viewport');
 const spacer   = document.getElementById('spacer');
 const visible  = document.getElementById('visible');
-
-// 整块高度（含行间 margin），用于 spacer 与坐标换算
-const ROW_FULL = RH + 4;
 
 function layout() {
   spacer.style.height = (count * ROW_FULL) + 'px';
@@ -144,11 +152,11 @@ function update(force) {
 
   if (!force && s === startRow && e === endRow) return;
 
-  // 重建前记录焦点（若正在编辑且仍可见，重建后恢复）
   const ae = document.activeElement;
-  let focusIdx = null;
-  if (ae && ae.dataset && ae.dataset.idx != null && visible.contains(ae)) {
-    focusIdx = +ae.dataset.idx;
+  let focusSel = null;
+  if (ae && ae.dataset && visible.contains(ae)) {
+    if (ae.dataset.idx != null) focusSel = `input[data-idx="${ae.dataset.idx}"]`;
+    else if (ae.dataset.labelIdx != null) focusSel = `input[data-label-idx="${ae.dataset.labelIdx}"]`;
   }
 
   startRow = s;
@@ -156,24 +164,26 @@ function update(force) {
   visible.style.top = (startRow * ROW_FULL) + 'px';
 
   let html = '';
-  for (let i = startRow; i < endRow; i++) {
-    html += `<div class="row"><span class="idx">${i+1}</span>`;
+  for (let r = startRow; r < endRow; r++) {
+    const i = count - 1 - r;             // 倒序：表格行 r → 数据索引 i
+    if (i < 0) continue;
+    const hl = (i === selected) ? ' hl' : '';
+    html += `<div class="row${hl}"><span class="idx">${i+1}</span>`;
     for (let j = 0; j < 4; j++) {
       const idx = i * 4 + j;
-      const v = values[idx] ?? '';
-      html += `<input type="number" step="any" data-idx="${idx}" value="${v}" title="${KEYS[j].toUpperCase()}">`;
+      html += `<input type="number" step="any" data-idx="${idx}" value="${values[idx] ?? ''}" title="${KEYS[j].toUpperCase()}">`;
     }
+    html += `<input class="lbl" type="text" data-label-idx="${i}" value="${esc(labels[i] || '')}" placeholder="标注" title="第${i+1}根标注">`;
     html += `</div>`;
   }
   visible.innerHTML = html;
 
-  if (focusIdx != null) {
-    const el = visible.querySelector(`input[data-idx="${focusIdx}"]`);
+  if (focusSel) {
+    const el = visible.querySelector(focusSel);
     if (el) el.focus();
   }
 }
 
-// 滚动：rAF 节流 + 窗口未变化则跳过重建
 let ticking = false;
 viewport.addEventListener('scroll', () => {
   if (ticking) return;
@@ -184,16 +194,24 @@ viewport.addEventListener('scroll', () => {
   });
 });
 
-// 输入：只更新数据 + 重绘图表，**绝不重建表格 DOM**（否则焦点/IME 会丢）
 visible.addEventListener('input', e => {
-  const idx = e.target.dataset && e.target.dataset.idx;
-  if (idx == null) return;
-  values[+idx] = e.target.value;
+  const t = e.target;
+  if (t.dataset.idx != null) values[+t.dataset.idx] = t.value;
+  else if (t.dataset.labelIdx != null) labels[+t.dataset.labelIdx] = t.value;
+  else return;
   save();
   draw();
 });
 
-// 容器尺寸变化时重算可见行
+visible.addEventListener('click', e => {
+  const row = e.target.closest('.row');
+  if (!row) return;
+  const inp = row.querySelector('input[data-idx]');
+  if (!inp) return;
+  const i = Math.floor(+inp.dataset.idx / 4);
+  if (i !== selected) { selected = i; draw(); update(true); }
+});
+
 new ResizeObserver(() => update(true)).observe(viewport);
 
 // ===== 数量变化 =====
@@ -207,15 +225,17 @@ function applyCount() {
   if (n === count) return;
 
   while (values.length < n * 4) {
-    const i = (values.length / 4) | 0;
-    const j = values.length % 4;
-    values.push(defaultVal(i, j));
+    values.push(defaultVal((values.length / 4) | 0, values.length % 4));
   }
   if (values.length > n * 4) values.length = n * 4;
+  while (labels.length < n) labels.push('');
+  if (labels.length > n) labels.length = n;
 
   count = n;
+  selected = -1;
   start = 0;
   span  = count;
+  viewport.scrollTop = 0;
   layout();
   save();
   draw();
@@ -226,41 +246,72 @@ countInput.addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); countInput.blur(); }
 });
 
-// ===== 批量输入：文本框 → 主表格（单向） =====
+// ===== 批量输入（单向，正序解析：第一行 = 第 1 根） =====
 const bulkText = document.getElementById('bulkText');
 const copyBtn  = document.getElementById('copyBtn');
 
-bulkText.addEventListener('input', () => {
-  const nums = bulkText.value.match(/-?\d+(?:\.\d+)?/g);
-  if (!nums || !nums.length) return;
+function parseBulk(text) {
+  text = text.trim();
+  if (!text) return null;
+  const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
 
-  let n = Math.ceil(nums.length / 4);
-  n = Math.max(1, Math.min(MAXN, n));
-
-  const nv = [];
-  for (let k = 0; k < n * 4; k++) {
-    if (k < nums.length) {
-      nv.push(nums[k]);
-    } else {
-      nv.push(values[k] ?? defaultVal((k / 4) | 0, k % 4));
+  if (lines.length === 1) {
+    const nums = text.match(/-?\d+(?:\.\d+)?/g) || [];
+    if (nums.length < 4) return null;
+    const n = Math.ceil(nums.length / 4);
+    const vs = [], ls = [];
+    for (let k = 0; k < n * 4; k++) {
+      vs.push(k < nums.length ? nums[k] : '');
+      if (k % 4 === 3) ls.push('');
     }
+    return { vs, ls };
   }
 
+  const vs = [], ls = [];
+  for (const line of lines) {
+    const ms = [...line.matchAll(/-?\d+(?:\.\d+)?/g)];
+    if (ms.length < 4) continue;
+    for (let k = 0; k < 4; k++) vs.push(ms[k][0]);
+    const last = ms[3];
+    ls.push(line.slice(last.index + last[0].length).trim());
+  }
+  if (!ls.length) return null;
+  return { vs, ls };
+}
+
+bulkText.addEventListener('input', () => {
+  const r = parseBulk(bulkText.value);
+  if (!r) return;
+
+  let n = Math.max(1, Math.min(MAXN, r.ls.length));
+  const nv = r.vs.slice(0, n * 4);
+  const nl = r.ls.slice(0, n);
+  while (nv.length < n * 4) {
+    const k = nv.length;
+    nv.push(values[k] ?? defaultVal((k / 4) | 0, k % 4));
+  }
+  while (nl.length < n) nl.push('');
+
   values = nv;
+  labels = nl;
   count  = n;
   countInput.value = n;
+  selected = -1;
   start = 0;
   span  = count;
+  viewport.scrollTop = 0;
   layout();
   save();
   draw();
 });
 
-// ===== 复制表格数据 =====
+// ===== 复制（★ 正序：第 1 根在前，与粘贴解析方向一致，往返不翻转） =====
 copyBtn.addEventListener('click', async () => {
   const lines = [];
-  for (let i = 0; i < count; i++) {
-    lines.push(values.slice(i * 4, i * 4 + 4).join(' '));
+  for (let i = 0; i < count; i++) {      // 正序，与 values 数组顺序一致
+    const base = values.slice(i * 4, i * 4 + 4).join(' ');
+    const lb = (labels[i] || '').trim();
+    lines.push(lb ? base + ' ' + lb : base);
   }
   const text = lines.join('\n');
 
@@ -284,10 +335,15 @@ copyBtn.addEventListener('click', async () => {
 const cvs = document.getElementById('chart');
 const ctx = cvs.getContext('2d');
 
+const TRACK = 40;
+
 function plotBox() {
   const W = cvs.clientWidth, H = cvs.clientHeight;
-  const L = 62, R = 22, T = 24, B = 34;
-  return { W, H, x0: L, x1: W - R, y0: T, y1: H - B, pw: W - R - L };
+  const L = 62, R = 22, T = 6, B = 34;
+  const x0 = L, x1 = W - R;
+  const trackY0 = T, trackY1 = T + TRACK;
+  const y0 = trackY1, y1 = H - B;
+  return { W, H, x0, x1, trackY0, trackY1, y0, y1, pw: x1 - x0 };
 }
 
 function axisArrow(x1, y1, x2, y2) {
@@ -301,8 +357,68 @@ function axisArrow(x1, y1, x2, y2) {
   ctx.closePath(); ctx.fill();
 }
 
+function drawTrack(items, x0, x1, trackY0, trackY1) {
+  ctx.strokeStyle = 'rgba(148,163,184,.15)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x0, trackY1 + 0.5); ctx.lineTo(x1, trackY1 + 0.5); ctx.stroke();
+
+  if (!items.length) return;
+
+  ctx.save();
+  ctx.font = '11px system-ui, sans-serif';
+
+  const ROW_H = 18;
+  const MAX_ROW = Math.max(1, Math.floor(TRACK / ROW_H));
+  const rows = [];
+  const placed = [];
+
+  items.sort((a, b) => (b.sel - a.sel) || (a.cx - b.cx));
+
+  for (const it of items) {
+    const tw = ctx.measureText(it.text).width + 10;
+    let left = it.cx - tw / 2;
+    left = Math.max(x0 + 2, Math.min(left, x1 - tw - 2));
+    const right = left + tw;
+
+    let row = -1;
+    for (let r = 0; r < MAX_ROW; r++) {
+      if (!rows[r] || rows[r] < left - 2) { row = r; break; }
+    }
+    if (row < 0) continue;
+    rows[row] = right;
+    placed.push({ ...it, left, right, row, tw });
+  }
+
+  ctx.setLineDash([2, 3]);
+  ctx.lineWidth = 1;
+  for (const p of placed) {
+    const cy = trackY0 + ROW_H / 2 + p.row * ROW_H;
+    ctx.strokeStyle = p.sel ? 'rgba(251,191,36,.55)' : 'rgba(96,165,250,.38)';
+    ctx.beginPath();
+    ctx.moveTo((p.left + p.right) / 2, cy + 8);
+    ctx.lineTo(p.cx, Math.max(p.yH - 2, cy + 10));
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  for (const p of placed) {
+    const cy = trackY0 + ROW_H / 2 + p.row * ROW_H;
+    ctx.fillStyle = p.sel ? '#fbbf24' : 'rgba(96,165,250,.92)';
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(p.left, cy - 8, p.tw, 16, 4);
+    else ctx.rect(p.left, cy - 8, p.tw, 16);
+    ctx.fill();
+
+    ctx.fillStyle = '#0b1220';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(p.text, (p.left + p.right) / 2, cy);
+  }
+  ctx.restore();
+}
+
 function draw() {
-  const { W, H, x0, x1, y0, y1, pw } = plotBox();
+  const { W, H, x0, x1, trackY0, trackY1, y0, y1, pw } = plotBox();
   if (!W || !H) return;
   const dpr = devicePixelRatio || 1;
   cvs.width = W * dpr; cvs.height = H * dpr;
@@ -338,7 +454,7 @@ function draw() {
   const toY = p => y1 - (p - lo) / (hi - lo) * (y1 - y0);
   const yZero = Math.max(y0, Math.min(y1, toY(0)));
 
-  axisArrow(x0, y1, x0, y0);
+  axisArrow(x0, y1, x0, trackY0);
   axisArrow(x0, yZero, x1, yZero);
 
   ctx.font = '12px monospace'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
@@ -357,12 +473,18 @@ function draw() {
   const slot = pw / span;
   const bw = Math.max(slot * 0.82, 1);
   const lw = slot > 8 ? 1.5 : 1;
-  const showLabel = slot >= 34;
+  const showBottom = slot >= 34;
 
   ctx.save();
   ctx.beginPath();
-  ctx.rect(x0, y0, pw, H - y0);
+  ctx.rect(x0, y0, pw, y1 - y0);
   ctx.clip();
+
+  if (selected >= 0 && selected >= i0 && selected <= i1) {
+    const sx = x0 + (selected - start + 0.5) * slot;
+    ctx.fillStyle = 'rgba(251,191,36,.10)';
+    ctx.fillRect(sx - slot / 2, y0, slot, y1 - y0);
+  }
 
   for (let i = i0; i <= i1; i++) {
     const d = data[i];
@@ -386,15 +508,47 @@ function draw() {
     if (up) ctx.strokeRect(cx - bw / 2, top, bw, bh);
     else    ctx.fillRect(cx - bw / 2, top, bw, bh);
 
-    if (showLabel) {
-      ctx.fillStyle = '#6b8199'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    if (i === selected) {
+      ctx.strokeStyle = '#fbbf24';
+      ctx.lineWidth = 1;
+      const yH = toY(d.h), yL = toY(d.l);
+      ctx.strokeRect(cx - bw / 2 - 3, Math.min(yH, yL) - 3, bw + 6, Math.abs(yL - yH) + 6);
+    }
+
+    if (showBottom) {
+      ctx.fillStyle = i === selected ? '#fbbf24' : '#6b8199';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.font = '12px monospace';
       ctx.fillText('第' + (i + 1) + '根', cx, y1 + 12);
     }
   }
   ctx.restore();
+
+  const trackItems = [];
+  for (let i = i0; i <= i1; i++) {
+    const lb = (labels[i] || '').trim();
+    if (!lb) continue;
+    const cx = x0 + (i - start + 0.5) * slot;
+    if (cx < x0 - 40 || cx > x1 + 40) continue;
+    trackItems.push({ cx, text: lb, yH: toY(data[i].h), sel: i === selected });
+  }
+  drawTrack(trackItems, x0, x1, trackY0, trackY1);
 }
 
-// ===== 交互：滚轮缩放 + 左键拖拽 =====
+function selectK(i) {
+  selected = i;
+  draw();
+
+  const r = count - 1 - i;
+  const vh = viewport.clientHeight;
+  const target = r * ROW_FULL - vh / 2 + ROW_FULL / 2;
+  viewport.scrollTop = Math.max(0, Math.min(target, count * ROW_FULL - vh));
+  update(true);
+
+  const el = visible.querySelector(`input[data-label-idx="${i}"]`);
+  if (el) { el.focus(); el.select(); }
+}
+
 cvs.addEventListener('wheel', e => {
   e.preventDefault();
   const { x0, x1, pw } = plotBox();
@@ -412,19 +566,22 @@ cvs.addEventListener('wheel', e => {
   draw();
 }, { passive: false });
 
-let dragging = false, dragX = 0, dragStart = 0;
+let dragging = false, dragX = 0, dragStart = 0, downX = 0, moved = false;
 
 cvs.addEventListener('mousedown', e => {
   if (e.button !== 0) return;
   e.preventDefault();
   dragging = true;
+  moved = false;
   dragX = e.clientX;
+  downX = e.clientX;
   dragStart = start;
   cvs.style.cursor = 'grabbing';
 });
 
 window.addEventListener('mousemove', e => {
   if (!dragging) return;
+  if (Math.abs(e.clientX - downX) > 4) moved = true;
   const { pw } = plotBox();
   if (pw <= 0) return;
   const slot = pw / span;
@@ -433,18 +590,27 @@ window.addEventListener('mousemove', e => {
   draw();
 });
 
-window.addEventListener('mouseup', () => {
+window.addEventListener('mouseup', e => {
   if (!dragging) return;
   dragging = false;
-  cvs.style.cursor = '';
+  cvs.style.cursor = 'crosshair';
+
+  if (moved) return;
+  const rect = cvs.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const { x0, x1, pw } = plotBox();
+  if (mx < x0 || mx > x1 || pw <= 0) return;
+  const slot = pw / span;
+  const i = Math.floor((mx - x0) / slot + start);
+  if (i >= 0 && i < count) selectK(i);
 });
 
 new ResizeObserver(draw).observe(cvs);
 
-// ===== 初始化 =====
 countInput.value = count;
 start = 0;
 span  = count;
+viewport.scrollTop = 0;
 layout();
 draw();
 </script>
